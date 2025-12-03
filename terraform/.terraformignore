@@ -1,7 +1,6 @@
 # Fichiers ignorés par Terraform
 *.tfstate
 *.tfstate.*
-*.terraform.lock.hcl
 .terraform/
 *.log
 *.pem
