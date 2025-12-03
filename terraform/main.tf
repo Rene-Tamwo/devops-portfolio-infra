@@ -127,10 +127,10 @@ resource "aws_security_group" "kubernetes" {
 
   # All traffic between nodes
   ingress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    self        = true
+    from_port = 0
+    to_port   = 0
+    protocol  = "-1"
+    self      = true
   }
 
   # Egress - tout sortant autorisé
@@ -153,7 +153,7 @@ resource "aws_instance" "master" {
   key_name               = aws_key_pair.kubernetes.key_name
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.kubernetes.id]
-  
+
   root_block_device {
     volume_size = 20
     volume_type = "gp2"
@@ -178,7 +178,7 @@ resource "aws_instance" "workers" {
   key_name               = aws_key_pair.kubernetes.key_name
   subnet_id              = aws_subnet.public.id
   vpc_security_group_ids = [aws_security_group.kubernetes.id]
-  
+
   root_block_device {
     volume_size = 20
     volume_type = "gp2"

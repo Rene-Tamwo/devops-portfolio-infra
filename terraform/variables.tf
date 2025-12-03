@@ -13,7 +13,7 @@ variable "cluster_name" {
 variable "instance_type" {
   description = "EC2 instance type"
   type        = string
-  default     = "t3.medium"  # Gratuit dans les limites free tier
+  default     = "t3.medium" # Gratuit dans les limites free tier
 }
 
 variable "key_name" {
