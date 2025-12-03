@@ -14,12 +14,6 @@ output "ssh_private_key" {
   sensitive   = true
 }
 
-output "kubeconfig" {
-  description = "Kubeconfig file content"
-  value       = local_file.kubeconfig.content
-  sensitive   = true
-}
-
 output "cluster_name" {
   description = "Kubernetes cluster name"
   value       = var.cluster_name
