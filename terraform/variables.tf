@@ -47,3 +47,4 @@ variable "ubuntu_ami" {
 }
 
 
+
