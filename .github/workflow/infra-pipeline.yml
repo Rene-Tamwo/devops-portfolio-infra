@@ -199,7 +199,7 @@ jobs:
   terraform-destroy:
     name: "Terraform Destroy"
     runs-on: ubuntu-latest
-    if: false  # Désactivé par défaut - à activer manuellement
+    if: true  # Désactivé par défaut - à activer manuellement
     
     steps:
     - name: Checkout code
