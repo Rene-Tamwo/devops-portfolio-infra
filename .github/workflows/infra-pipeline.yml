@@ -199,6 +199,7 @@ jobs:
   terraform-destroy:
     name: "Terraform Destroy"
     runs-on: ubuntu-latest
+    needs: ansible-configure
     if: true  # Désactivé par défaut - à activer manuellement
     
     steps:
