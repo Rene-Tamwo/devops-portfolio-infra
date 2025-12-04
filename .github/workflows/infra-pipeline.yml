@@ -69,6 +69,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: terraform-validate
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      master_ip: ${{ steps.tf-outputs.outputs.MASTER_IP }}
+      worker_ip: ${{ steps.tf-outputs.outputs.WORKER_IPS }}
     
     steps:
     - name: Checkout code
@@ -86,31 +89,41 @@ jobs:
       run: |
         cd terraform
         terraform init -input=false
-        
-        # Applique directement
         terraform apply -auto-approve -input=false -var="aws_region=${{ secrets.AWS_REGION }}"
-
-        # Récupère les outputs
-        echo "MASTER_IP=$(terraform output -raw master_public_ip)" >> $GITHUB_OUTPUT
-        
-        # Pour les workers, on crée un tableau
-        WORKER_IPS_JSON=$(terraform output -json worker_public_ips)
-        echo "WORKER_IPS_JSON=${WORKER_IPS_JSON}" >> $GITHUB_ENV
-        
-        # Récupère la clé SSH
-        terraform output -raw ssh_private_key > kubernetes-key.pem
-        chmod 600 kubernetes-key.pem
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-    - name: Parse Workers IPs
-      id: parse_ips
+    - name: Get Terraform Outputs
+      id: tf-outputs  # ⚠️ ID CORRECT : tf-outputs
       run: |
-        # Convertit JSON en liste séparée par des espaces
-        WORKER_IPS=$(echo '${{ env.WORKER_IPS_JSON }}' | jq -r '.[]' | tr '\n' ' ')
-        echo "WORKER_IPS=${WORKER_IPS}" >> $GITHUB_ENV
-        echo "Parsed worker IPs: ${WORKER_IPS}"
+        cd terraform
+        
+        # 1. Récupérer l'IP du master
+        MASTER_IP=$(terraform output -raw master_public_ip)
+        echo "Master IP: $MASTER_IP"
+        echo "MASTER_IP=$MASTER_IP" >> $GITHUB_OUTPUT
+        
+        # 2. Récupérer les IPs des workers (sous forme de JSON)
+        WORKER_IPS_JSON=$(terraform output -json worker_public_ips)
+        echo "Worker IPs JSON: $WORKER_IPS_JSON"
+        
+        # 3. Convertir JSON en liste simple (séparée par des espaces)
+        WORKER_IPS_LIST=$(echo $WORKER_IPS_JSON | jq -r '.[]' | tr '\n' ' ' | sed 's/ $//')
+        echo "Worker IPs List: $WORKER_IPS_LIST"
+        echo "WORKER_IPS=$WORKER_IPS_LIST" >> $GITHUB_OUTPUT
+        
+        # 4. Sauvegarder la clé SSH
+        terraform output -raw ssh_private_key > kubernetes-key.pem
+        chmod 600 kubernetes-key.pem
+        
+        # 5. Afficher pour debug
+        echo "=== DEBUG ==="
+        echo "MASTER_IP from output: $MASTER_IP"
+        echo "WORKER_IPS from output: $WORKER_IPS_LIST"
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     - name: Upload SSH Key
       uses: actions/upload-artifact@v4
@@ -119,10 +132,6 @@ jobs:
         path: terraform/kubernetes-key.pem
         retention-days: 1
 
-    - name: Save IPs to Environment
-      run: |
-        echo "MASTER_IP=${{ steps.outputs.outputs.MASTER_IP }}" >> $GITHUB_ENV
-        echo "WORKER_IPS=${{ steps.outputs.outputs.WORKER_IPS }}" >> $GITHUB_ENV
 
   # Job 3: Configuration Ansible
   ansible-configure:
@@ -153,38 +162,82 @@ jobs:
         mkdir -p ~/.ssh
         cp /tmp/kubernetes-key.pem ~/.ssh/
         echo "StrictHostKeyChecking no" >> ~/.ssh/config
+        echo "UserKnownHostsFile /dev/null" >> ~/.ssh/config
 
-    - name: Generate Dynamic Inventory
+    - name: Get IPs from Previous Job
+      id: get-ips
       run: |
-        cd ansible
-        # Remplacer les variables dans l'inventory
-        MASTER_IP="${{ env.MASTER_IP }}"
-        WORKER_IPS=(${{ env.WORKER_IPS }})
-        
-        cat > dynamic-inventory.ini << EOF
-        [master]
-        devops-portfolio-cluster-master ansible_host=$MASTER_IP ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem
+        # ⚠️ CORRECT : Utiliser needs.terraform-apply.outputs
+        echo "Getting IPs from terraform-apply job..."
+        echo "MASTER_IP=${{ needs.terraform-apply.outputs.master_ip }}" >> $GITHUB_ENV
+        echo "WORKER_IPS=${{ needs.terraform-apply.outputs.worker_ips }}" >> $GITHUB_ENV
 
-        [workers]
-        EOF
-        
-        for i in "${!WORKER_IPS[@]}"; do
-          echo "devops-portfolio-cluster-worker-$((i+1)) ansible_host=${WORKER_IPS[$i]} ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem" >> dynamic-inventory.ini
-        done
-        
-        echo "" >> dynamic-inventory.ini
-        echo "[kube_cluster:children]" >> dynamic-inventory.ini
-        echo "master" >> dynamic-inventory.ini
-        echo "workers" >> dynamic-inventory.ini
-        echo "" >> dynamic-inventory.ini
-        echo "[all:vars]" >> dynamic-inventory.ini
-        echo "ansible_python_interpreter=/usr/bin/python3" >> dynamic-inventory.ini
-        echo "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> dynamic-inventory.ini
+        # Debug
+        echo "Master IP: ${{ needs.terraform-apply.outputs.master_ip }}"
+        echo "Worker IPs: ${{ needs.terraform-apply.outputs.worker_ips }}"
+
+    - name: Debug IPs
+      run: |
+        echo "=== DEBUG ENVIRONMENT ==="
+        echo "MASTER_IP from env: $MASTER_IP"
+        echo "WORKER_IPS from env: $WORKER_IPS"
+
+        if [ -z "$MASTER_IP" ]; then
+          echo "❌ ERROR: MASTER_IP is empty!"
+          exit 1
+        fi
 
     - name: Wait for instances to be ready
       run: |
         echo "⏳ Waiting for EC2 instances to be ready..."
-        sleep 60
+        sleep 120  # Augmenté à 2 minutes
+
+    - name: Generate Dynamic Inventory
+      run: |
+        cd ansible
+        
+        # ⚠️ CORRECT : Utiliser les variables d'environnement
+        MASTER_IP="$MASTER_IP"
+        # Convertir la chaîne d'IPs en tableau
+        IFS=' ' read -r -a WORKER_IPS_ARRAY <<< "$WORKER_IPS"
+        
+        echo "Generating inventory with:"
+        echo "Master: $MASTER_IP"
+        echo "Workers: ${WORKER_IPS_ARRAY[@]}"
+        
+        cat > dynamic-inventory.ini << EOF
+[master]
+devops-portfolio-cluster-master ansible_host=$MASTER_IP ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem
+
+[workers]
+EOF
+
+        for i in "${!WORKER_IPS_ARRAY[@]}"; do
+          echo "devops-portfolio-cluster-worker-$((i+1)) ansible_host=${WORKER_IPS_ARRAY[$i]} ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem" >> dynamic-inventory.ini
+        done
+
+        cat >> dynamic-inventory.ini << EOF
+
+[kube_cluster:children]
+master
+workers
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+EOF
+
+        echo "=== GENERATED INVENTORY ==="
+        cat dynamic-inventory.ini
+
+    - name: Test SSH Connection
+      run: |
+        echo "Testing SSH connection to master..."
+        ssh -i /tmp/kubernetes-key.pem \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            ubuntu@$MASTER_IP "echo '✅ SSH connection successful'" || echo "❌ SSH connection failed"
+
 
     - name: Run Ansible Playbook
       run: |
@@ -193,17 +246,35 @@ jobs:
 
     - name: Test Kubernetes Cluster
       run: |
-        ssh -i /tmp/kubernetes-key.pem -o StrictHostKeyChecking=no ubuntu@${{ env.MASTER_IP }} "
+        ssh -i /tmp/kubernetes-key.pem \
+            -o StrictHostKeyChecking=no \
+            ubuntu@$MASTER_IP "
+          echo '=== Kubernetes Cluster Info ==='
           kubectl cluster-info
+          echo ''
+          echo '=== Nodes ==='
           kubectl get nodes
+          echo ''
+          echo '=== Pods ==='
           kubectl get pods --all-namespaces
         "
 
   # Job 4: Nettoyage (manuel)
   terraform-destroy:
-    name: "Terraform Destroy"
+    name: Destroy Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type 'DESTROY' to confirm"
+        required: true
+        default: ""
+
+jobs:
+  destroy:
+    if: github.event.inputs.confirm == 'DESTROY'
     runs-on: ubuntu-latest
-    if: true  # Désactivé par défaut - à activer manuellement
     
     steps:
     - name: Checkout code
@@ -215,8 +286,9 @@ jobs:
     - name: Terraform Destroy
       run: |
         cd terraform
-        terraform init
-        terraform destroy -auto-approve
+        terraform init -input=false
+        terraform destroy -auto-approve -input=false
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
