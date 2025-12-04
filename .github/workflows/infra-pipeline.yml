@@ -205,7 +205,7 @@ jobs:
         echo "Master: $MASTER_IP"
         echo "Workers: ${WORKER_IPS_ARRAY[@]}"
         
-        cat > dynamic-inventory.ini << EOF
+        cat > dynamic-inventory.ini << 'EOF'
 [master]
 devops-portfolio-cluster-master ansible_host=$MASTER_IP ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem
 
@@ -216,7 +216,7 @@ EOF
           echo "devops-portfolio-cluster-worker-$((i+1)) ansible_host=${WORKER_IPS_ARRAY[$i]} ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem" >> dynamic-inventory.ini
         done
 
-        cat >> dynamic-inventory.ini << EOF
+        cat >> dynamic-inventory.ini << 'EOF'
 
 [kube_cluster:children]
 master
