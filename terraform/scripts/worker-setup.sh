@@ -78,4 +78,12 @@ while ! nc -z $MASTER_IP 6443; do
   sleep 5
 done
 
+echo "✅ Installation verification..."
+which docker && echo "Docker installed" || echo "Docker NOT installed"
+which kubeadm && echo "kubeadm installed" || echo "kubeadm NOT installed"
+which kubectl && echo "kubectl installed" || echo "kubectl NOT installed"
+
+# Créer un fichier marqueur pour indiquer que le script a terminé
+touch /var/tmp/setup-completed
+
 echo "✅ Master is ready! Joining cluster..."

@@ -86,5 +86,11 @@ kubeadm token create --print-join-command > /join-cluster.sh
 chmod +x /join-cluster.sh
 
 echo "✅ Kubernetes Master setup completed!"
+
+which docker && echo "Docker installed" || echo "Docker NOT installed"
+which kubeadm && echo "kubeadm installed" || echo "kubeadm NOT installed"
+
+touch /var/tmp/worker-setup-completed
+
 echo "📋 Run the following command on worker nodes:"
 cat /join-cluster.sh

@@ -7,6 +7,115 @@
       wait_for_connection:
         timeout: 300
 
+    # Vérifier si les packages sont installés
+    - name: Check if kubeadm is installed
+      shell: which kubeadm
+      register: kubeadm_check
+      ignore_errors: true
+
+    - name: Check if Docker is installed
+      shell: which docker
+      register: docker_check
+      ignore_errors: true
+
+    # Installer les dépendances si manquantes
+    - name: Install dependencies if missing
+      block:
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+            cache_valid_time: 3600
+
+        - name: Install required system packages
+          apt:
+            name:
+              - apt-transport-https
+              - ca-certificates
+              - curl
+              - gnupg
+              - lsb-release
+              - software-properties-common
+            state: present
+
+        - name: Add Docker repository
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+          when: docker_check.rc != 0
+
+        - name: Add Docker repo
+          apt_repository:
+            repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+            state: present
+            update_cache: yes
+          when: docker_check.rc != 0
+
+        - name: Install Docker
+          apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+            state: present
+          when: docker_check.rc != 0
+
+        - name: Start Docker service
+          systemd:
+            name: docker
+            state: started
+            enabled: yes
+          when: docker_check.rc != 0
+
+        - name: Add Kubernetes repository key
+          apt_key:
+            url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+            state: present
+          when: kubeadm_check.rc != 0
+
+        - name: Add Kubernetes repository
+          apt_repository:
+            repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+            state: present
+            update_cache: yes
+          when: kubeadm_check.rc != 0
+
+        - name: Install Kubernetes packages
+          apt:
+            name:
+              - kubelet=1.28.0-00
+              - kubeadm=1.28.0-00
+              - kubectl=1.28.0-00
+            state: present
+          when: kubeadm_check.rc != 0
+
+        - name: Hold Kubernetes packages at specific version
+          shell: apt-mark hold kubelet kubeadm kubectl
+          when: kubeadm_check.rc != 0
+
+        - name: Disable swap
+          shell: |
+            swapoff -a
+            sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+        - name: Load kernel modules
+          shell: |
+            modprobe overlay
+            modprobe br_netfilter
+
+        - name: Configure sysctl
+          copy:
+            dest: /etc/sysctl.d/k8s.conf
+            content: |
+              net.bridge.bridge-nf-call-ip6tables = 1
+              net.bridge.bridge-nf-call-iptables = 1
+              net.ipv4.ip_forward = 1
+
+        - name: Apply sysctl settings
+          shell: sysctl --system
+
+      when: kubeadm_check.rc != 0 or docker_check.rc != 0
+
+    # Vérifier si le cluster est déjà initialisé
     - name: Check if cluster is already initialized
       stat:
         path: /etc/kubernetes/admin.conf
@@ -48,6 +157,34 @@
     - name: Wait for SSH to be available
       wait_for_connection:
         timeout: 300
+
+    # Vérifier et installer sur les workers aussi
+    - name: Check if kubeadm is installed on workers
+      shell: which kubeadm
+      register: worker_kubeadm_check
+      ignore_errors: true
+
+    - name: Install kubeadm on workers if missing
+      block:
+        - name: Update apt cache
+          apt:
+            update_cache: yes
+
+        - name: Install Docker and kubeadm on workers
+          apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+              - kubelet=1.28.0-00
+              - kubeadm=1.28.0-00
+            state: present
+
+        - name: Disable swap on workers
+          shell: |
+            swapoff -a
+            sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+      when: worker_kubeadm_check.rc != 0
 
     - name: Join worker to cluster
       shell: "{{ join_command }} --ignore-preflight-errors=all"
