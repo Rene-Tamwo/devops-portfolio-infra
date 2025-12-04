@@ -26,6 +26,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with: 
+        fetch-depth: 0 
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
@@ -42,7 +44,8 @@ jobs:
       id: init
       run: |
         cd terraform
-        terraform init
+        # Utilise le lock file du repository
+        terraform init -input=false -backend=false
 
     - name: Terraform Validate
       id: validate
@@ -54,7 +57,7 @@ jobs:
       id: plan
       run: |
         cd terraform
-        terraform plan -var="aws_region=${{ secrets.AWS_REGION }}" -out=tfplan
+        terraform plan -input=false -var="aws_region=${{ secrets.AWS_REGION }}"
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -75,38 +78,44 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with: 
+        fetch-depth: 0
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: "1.5.0"
 
-    - name: Download Terraform Plan
-      uses: actions/download-artifact@v4
-      with:
-        name: terraform-plan
-        path: terraform
-
     - name: Terraform Apply
       id: apply
       run: |
         cd terraform
-        terraform apply -auto-approve tfplan
-      env:
-        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        terraform init -input=false
+        
+        # Applique directement
+        terraform apply -auto-approve -input=false -var="aws_region=${{ secret.AWS_REGION }}"
 
-    - name: Get Terraform Outputs
-      id: outputs
-      run: |
-        cd terraform
+        # Récupère les outputs
         echo "MASTER_IP=$(terraform output -raw master_public_ip)" >> $GITHUB_OUTPUT
-        echo "WORKER_IPS=$(terraform output -json worker_public_ips | jq -r '.[]')" >> $GITHUB_OUTPUT
+        
+        # Pour les workers, on crée un tableau
+        WORKER_IPS_JSON=$(terraform output -json worker_public_ips)
+        echo "WORKER_IPS_JSON=${WORKER_IPS_JSON}" >> $GITHUB_ENV
+        
+        # Récupère la clé SSH
         terraform output -raw ssh_private_key > kubernetes-key.pem
         chmod 600 kubernetes-key.pem
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    - name: Parse Workers IPs
+      id: parse_ips
+      run: |
+        # Convertit JSON en liste séparée par des espaces
+        WORKER_IPS=$(echo '${{ env.WORKER_IPS_JSON }}' | jq -r '.[]' | tr '\n' ' ')
+        echo "WORKER_IPS=${WORKER_IPS}" >> $GITHUB_ENV
+        echo "Parsed worker IPs: ${WORKER_IPS}"
 
     - name: Upload SSH Key
       uses: actions/upload-artifact@v4
