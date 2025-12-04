@@ -262,20 +262,11 @@ EOF
   # Job 4: Nettoyage (manuel)
   terraform-destroy:
     name: Destroy Infrastructure
-
-on:
-  workflow_dispatch:
-    inputs:
-      confirm:
-        description: "Type 'DESTROY' to confirm"
-        required: true
-        default: ""
-
-jobs:
-  destroy:
-    if: github.event.inputs.confirm == 'DESTROY'
     runs-on: ubuntu-latest
-    
+    # Ce job ne s'exécute QUE quand on déclenche manuellement avec 'workflow_dispatch'
+    # et qu'on tape 'DESTROY' dans la confirmation
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'DESTROY'
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -291,4 +282,3 @@ jobs:
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
