@@ -148,7 +148,7 @@ resource "aws_security_group" "kubernetes" {
 
 # Instance Master Kubernetes
 resource "aws_instance" "master" {
-  ami                    = var.ubuntu_ami[var.aws_region]
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.kubernetes.key_name
   subnet_id              = aws_subnet.public.id
@@ -173,7 +173,7 @@ resource "aws_instance" "master" {
 resource "aws_instance" "workers" {
   count = var.node_count
 
-  ami                    = var.ubuntu_ami[var.aws_region]
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.kubernetes.key_name
   subnet_id              = aws_subnet.public.id
@@ -197,22 +197,20 @@ resource "aws_instance" "workers" {
 }
 
 # Data source pour l'AMI Ubuntu
-#data "aws_ami" "ubuntu" {
-#  most_recent = true
-#  owners      = ["099720109477"] # Canonical
 
-#  filter {
-#    name   = "name"
-#    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
-#  }
+data "aws_ami" "ubuntu" {
+  most_recent = true
 
-#  filter {
-#    name   = "virtualization-type"
-#    values = ["hvm"]
-#  }
-#  filter {
-#    name   = "architecture"
-#    values = ["x86_64"]
-#  }
-#}
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-22.04-*-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  owners = ["099720109477"] #Canonical
+}
 
