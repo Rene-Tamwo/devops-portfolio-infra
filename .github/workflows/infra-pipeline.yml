@@ -93,7 +93,7 @@ jobs:
         terraform init -input=false
         
         # Applique directement
-        terraform apply -auto-approve -input=false -var="aws_region=${{ secret.AWS_REGION }}"
+        terraform apply -auto-approve -input=false -var="aws_region=${{ secrets.AWS_REGION }}"
 
         # Récupère les outputs
         echo "MASTER_IP=$(terraform output -raw master_public_ip)" >> $GITHUB_OUTPUT
