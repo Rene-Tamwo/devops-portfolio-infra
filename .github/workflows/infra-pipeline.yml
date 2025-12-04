@@ -196,39 +196,31 @@ jobs:
       run: |
         cd ansible
         
-        # ⚠️ CORRECT : Utiliser les variables d'environnement
         MASTER_IP="$MASTER_IP"
-        # Convertir la chaîne d'IPs en tableau
         IFS=' ' read -r -a WORKER_IPS_ARRAY <<< "$WORKER_IPS"
         
         echo "Generating inventory with:"
         echo "Master: $MASTER_IP"
         echo "Workers: ${WORKER_IPS_ARRAY[@]}"
         
-        cat > dynamic-inventory.ini << 'EOF'
-[master]
-devops-portfolio-cluster-master ansible_host=$MASTER_IP ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem
-
-[workers]
-EOF
-
+        # Version simple sans heredoc
+        echo "[master]" > dynamic-inventory.ini
+        echo "devops-portfolio-cluster-master ansible_host=$MASTER_IP ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem" >> dynamic-inventory.ini
+        echo "" >> dynamic-inventory.ini
+        echo "[workers]" >> dynamic-inventory.ini
+        
         for i in "${!WORKER_IPS_ARRAY[@]}"; do
           echo "devops-portfolio-cluster-worker-$((i+1)) ansible_host=${WORKER_IPS_ARRAY[$i]} ansible_user=ubuntu ansible_ssh_private_key_file=/tmp/kubernetes-key.pem" >> dynamic-inventory.ini
         done
-
-        cat >> dynamic-inventory.ini << 'EOF'
-
-[kube_cluster:children]
-master
-workers
-
-[all:vars]
-ansible_python_interpreter=/usr/bin/python3
-ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
-EOF
-
-        echo "=== GENERATED INVENTORY ==="
-        cat dynamic-inventory.ini
+        
+        echo "" >> dynamic-inventory.ini
+        echo "[kube_cluster:children]" >> dynamic-inventory.ini
+        echo "master" >> dynamic-inventory.ini
+        echo "workers" >> dynamic-inventory.ini
+        echo "" >> dynamic-inventory.ini
+        echo "[all:vars]" >> dynamic-inventory.ini
+        echo "ansible_python_interpreter=/usr/bin/python3" >> dynamic-inventory.ini
+        echo "ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'" >> dynamic-inventory.ini
 
     - name: Test SSH Connection
       run: |
