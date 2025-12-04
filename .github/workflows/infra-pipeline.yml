@@ -262,11 +262,10 @@ EOF
   # Job 4: Nettoyage (manuel)
   terraform-destroy:
     name: Destroy Infrastructure
+    needs: ansible-configure
     runs-on: ubuntu-latest
-    # Ce job ne s'exécute QUE quand on déclenche manuellement avec 'workflow_dispatch'
-    # et qu'on tape 'DESTROY' dans la confirmation
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'DESTROY'
-
+    if: false  # Désactivé par défaut - à activer manuellement
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -277,8 +276,8 @@ EOF
     - name: Terraform Destroy
       run: |
         cd terraform
-        terraform init -input=false
-        terraform destroy -auto-approve -input=false
+        terraform init
+        terraform destroy -auto-approve
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
