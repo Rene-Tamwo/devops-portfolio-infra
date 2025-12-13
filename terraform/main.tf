@@ -159,7 +159,6 @@ resource "aws_instance" "master" {
     volume_type = "gp2"
   }
 
-  user_data = file("${path.module}/scripts/master-setup.sh")
 
   tags = {
     Name = "${var.cluster_name}-master"
@@ -183,10 +182,6 @@ resource "aws_instance" "workers" {
     volume_size = 20
     volume_type = "gp2"
   }
-
-  user_data = templatefile("${path.module}/scripts/worker-setup.sh", {
-    master_ip = aws_instance.master.private_ip
-  })
 
   tags = {
     Name = "${var.cluster_name}-worker-${count.index + 1}"
