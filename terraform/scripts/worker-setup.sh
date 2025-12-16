@@ -19,4 +19,20 @@ apt-get update
 apt-get install -y kubelet kubeadm
 apt-mark hold kubelet kubeadm
 
+
+# Marquer la fin de l'installation
+touch /var/lib/cloud/instance/boot-finished
+
+# Créer un fichier de status
+cat <<EOF > /tmp/setup-status.txt
+✅ Setup completed at: $(date)
+✅ Docker: $(docker --version)
+✅ kubeadm: $(kubeadm version -o short)
+✅ kubelet: $(kubelet --version)
+EOF
+
+cat /tmp/setup-status.txt
+
+
+
 echo "✅ Worker setup complete! Waiting for master..."
