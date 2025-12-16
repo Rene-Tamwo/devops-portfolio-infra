@@ -1,224 +1,47 @@
 ---
-- name: Configure Kubernetes Cluster
+- name: Basic Kubernetes Setup
   hosts: all
   become: yes
-  gather_facts: yes
-  vars:
-    k8s_version: "1.28.0"
-    pod_network_cidr: "10.244.0.0/16"
-
+  
   tasks:
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-
-    - name: Install required system packages
-      apt:
-        name:
-          - apt-transport-https
-          - ca-certificates
-          - curl
-          - gnupg
-          - lsb-release
-          - software-properties-common
-          - python3
-        state: present
-
-    - name: Add Docker GPG key
-      apt_key:
-        url: https://download.docker.com/linux/ubuntu/gpg
-        state: present
-
-    - name: Add Docker repository
-      apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
-        state: present
-        filename: docker
-
     - name: Install Docker
       apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-        state: present
-        update_cache: yes
-
-    - name: Configure Docker daemon
-      copy:
-        dest: /etc/docker/daemon.json
-        content: |
-          {
-            "exec-opts": ["native.cgroupdriver=systemd"],
-            "log-driver": "json-file",
-            "log-opts": {
-              "max-size": "100m"
-            },
-            "storage-driver": "overlay2"
-          }
-
-    - name: Start and enable Docker
-      systemd:
-        name: docker
-        state: started
-        enabled: yes
-        daemon_reload: yes
-
-    - name: Disable swap
-      shell: |
-        swapoff -a
-        sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
-      register: swap_result
-      changed_when: "'already' not in swap_result.stdout"
-
-    - name: Load kernel modules
-      modprobe:
-        name: "{{ item }}"
-        state: present
-      loop:
-        - overlay
-        - br_netfilter
-
-    - name: Configure sysctl
-      sysctl:
-        name: "{{ item.name }}"
-        value: "{{ item.value }}"
-        state: present
-        reload: yes
-      loop:
-        - { name: net.bridge.bridge-nf-call-ip6tables, value: 1 }
-        - { name: net.bridge.bridge-nf-call-iptables, value: 1 }
-        - { name: net.ipv4.ip_forward, value: 1 }
-
-    - name: Add Kubernetes GPG key
-      apt_key:
-        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        name: docker.io
         state: present
 
-    - name: Add Kubernetes repository (Ubuntu 22.04/Jammy)
-      apt_repository:
-        # CORRECTION : kubernetes-jammy au lieu de kubernetes-xenial
-        repo: "deb https://apt.kubernetes.io/ kubernetes-jammy main"
-        state: present
-        filename: kubernetes
-
-    - name: Install Kubernetes packages
+    - name: Install kubeadm, kubelet, kubectl
       apt:
         name:
-          - kubelet={{ k8s_version }}-00
-          - kubeadm={{ k8s_version }}-00
-          - kubectl={{ k8s_version }}-00
+          - kubeadm
+          - kubelet
+          - kubectl
         state: present
-        update_cache: yes
-        allow_downgrade: yes
 
-    - name: Hold Kubernetes packages at specific version
-      dpkg_selections:
-        name: "{{ item }}"
-        selection: hold
-      loop:
-        - kubelet
-        - kubeadm
-        - kubectl
-
-- name: Configure Kubernetes Master
+- name: Setup Master
   hosts: master
   become: yes
-
+  
   tasks:
-    - name: Wait for SSH to be fully ready
-      wait_for:
-        port: 22
-        delay: 10
-        timeout: 300
+    - name: Initialize cluster
+      shell: kubeadm init --pod-network-cidr=10.244.0.0/16
 
-    - name: Check if Kubernetes is already initialized
-      stat:
-        path: /etc/kubernetes/admin.conf
-      register: kubeconfig
-
-    - name: Initialize Kubernetes cluster
-      shell: |
-        kubeadm init \
-          --pod-network-cidr={{ pod_network_cidr }} \
-          --ignore-preflight-errors=all
-      when: not kubeconfig.stat.exists
-      async: 300
-      poll: 10
-
-    - name: Setup kubeconfig for root user
-      shell: |
-        mkdir -p /root/.kube
-        cp -i /etc/kubernetes/admin.conf /root/.kube/config
-        chown $(id -u):$(id -g) /root/.kube/config
-      when: not kubeconfig.stat.exists
-
-    - name: Setup kubeconfig for current user
+    - name: Setup kubeconfig
       shell: |
         mkdir -p $HOME/.kube
         sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
         sudo chown $(id -u):$(id -g) $HOME/.kube/config
-      when: not kubeconfig.stat.exists
 
-    - name: Install Flannel network plugin
-      shell: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-      when: not kubeconfig.stat.exists
+    - name: Install Flannel
+      shell: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
 
-    - name: Generate join command
-      shell: kubeadm token create --print-join-command > /join-cluster.sh && chmod +x /join-cluster.sh
-      when: not kubeconfig.stat.exists
-
-    - name: Get join command
-      shell: cat /join-cluster.sh
-      register: join_command
-      changed_when: false
-
-    - name: Display join command
-      debug:
-        msg: "Join command for workers: {{ join_command.stdout }}"
-
-- name: Configure Kubernetes Workers
+- name: Join Workers
   hosts: workers
   become: yes
-  vars:
-    join_command: "{{ hostvars[groups['master'][0]]['join_command']['stdout'] }}"
-
+  
   tasks:
-    - name: Wait for master API to be ready
-      wait_for:
-        host: "{{ hostvars[groups['master'][0]]['ansible_host'] }}"
-        port: 6443
-        timeout: 300
-        delay: 30
+    - name: Get join command from master
+      shell: ssh -o StrictHostKeyChecking=no ubuntu@{{ hostvars[groups['master'][0]]['ansible_host'] }} "kubeadm token create --print-join-command"
+      register: join_command
 
-    - name: Join worker to cluster
-      shell: "{{ join_command }} --ignore-preflight-errors=all"
-      async: 120
-      poll: 10
-
-- name: Verify Cluster
-  hosts: master
-  become: yes
-
-  tasks:
-    - name: Check cluster nodes
-      shell: kubectl get nodes
-      register: nodes
-      changed_when: false
-      retries: 10
-      delay: 10
-      until: nodes.stdout.find('Ready') != -1
-
-    - name: Display nodes
-      debug:
-        msg: "{{ nodes.stdout_lines }}"
-
-    - name: Check system pods
-      shell: kubectl get pods --all-namespaces
-      register: pods
-      changed_when: false
-
-    - name: Display pods
-      debug:
-        msg: "{{ pods.stdout_lines }}"
+    - name: Join cluster
+      shell: "{{ join_command.stdout }}"
