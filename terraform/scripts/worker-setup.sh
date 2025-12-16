@@ -12,13 +12,13 @@ sh get-docker.sh
 swapoff -a
 sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
 
-# Installation Kubernetes
-curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
-apt-get update
-apt-get install -y kubelet kubeadm
-apt-mark hold kubelet kubeadm
+# NOUVELLE MÉTHODE pour installer Kubernetes (Ubuntu 22.04+)
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | tee /etc/apt/sources.list.d/kubernetes.list
 
+apt-get update
+apt-get install -y kubelet=1.28.0-1.1 kubeadm=1.28.0-1.1
+apt-mark hold kubelet kubeadm
 
 # Marquer la fin de l'installation
 touch /var/lib/cloud/instance/boot-finished

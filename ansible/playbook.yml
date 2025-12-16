@@ -1,5 +1,5 @@
 ---
-- name: Wait for instances to be ready
+- name: Wait for instances to be ready and verify setup
   hosts: all
   become: yes
   gather_facts: no
@@ -9,119 +9,70 @@
       wait_for_connection:
         timeout: 300
 
-    - name: Wait for cloud-init to complete
+    - name: Check if cloud-init completed
       shell: |
-        timeout 300 bash -c 'while [ ! -f /var/lib/cloud/instance/boot-finished ]; do sleep 10; done'
-        echo "cloud-init completed"
+        if [ -f /var/lib/cloud/instance/boot-finished ]; then
+          echo "cloud-init already completed"
+        else
+          echo "cloud-init not completed, waiting..."
+          sleep 30
+        fi
       changed_when: false
+      register: cloud_init_check
 
-    - name: Install required packages
-      apt:
-        name:
-          - curl
-          - gnupg
-          - software-properties-common
-          - apt-transport-https
-          - ca-certificates
-        state: present
-        update_cache: yes
+    - name: Wait additional time if needed
+      pause:
+        seconds: 30
+      when: "'already' not in cloud_init_check.stdout"
 
-    - name: Add Docker GPG key
-      apt_key:
-        url: https://download.docker.com/linux/ubuntu/gpg
-        state: present
-
-    - name: Add Docker repository
-      apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu jammy stable"
-        state: present
-
-    - name: Install Docker
-      apt:
-        name:
-          - docker-ce
-          - docker-ce-cli
-          - containerd.io
-        state: present
-
-    - name: Start and enable Docker
-      systemd:
-        name: docker
-        state: started
-        enabled: yes
-
-    - name: Add Kubernetes repository (nouvelle méthode)
+    - name: Verify Docker installation
       shell: |
-        # Nouvelle méthode officielle Kubernetes
-        sudo mkdir -p /etc/apt/keyrings
-        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-        echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+        docker --version
+        systemctl is-active docker
+      register: docker_check
       changed_when: false
 
-    - name: Install Kubernetes components
-      apt:
-        name:
-          - kubelet=1.28.0-1.1
-          - kubeadm=1.28.0-1.1
-          - kubectl=1.28.0-1.1
-        state: present
-        update_cache: yes
-
-    - name: Hold Kubernetes packages at current version
-      shell: apt-mark hold kubelet kubeadm kubectl
-      changed_when: false
-
-    - name: Disable swap
+    - name: Verify Kubernetes installation
       shell: |
-        swapoff -a
-        sed -i '/ swap / s/^/#/' /etc/fstab
+        kubeadm version -o short 2>/dev/null || echo "kubeadm not installed"
+        kubelet --version 2>/dev/null || echo "kubelet not installed"
+      register: kube_check
       changed_when: false
 
-    - name: Load kernel modules
-      shell: |
-        modprobe overlay
-        modprobe br_netfilter
-      changed_when: false
+    - name: Debug show installation status
+      debug:
+        msg:
+          - "Docker: {{ docker_check.stdout_lines }}"
+          - "Kubernetes: {{ kube_check.stdout_lines }}"
 
-    - name: Configure sysctl
-      shell: |
-        cat > /etc/sysctl.d/kubernetes.conf << EOF
-        net.bridge.bridge-nf-call-ip6tables = 1
-        net.bridge.bridge-nf-call-iptables = 1
-        net.ipv4.ip_forward = 1
-        EOF
-        sysctl --system
-      changed_when: false
-
-- name: Configure Kubernetes Master
+- name: Configure and verify Kubernetes Master
   hosts: master
   become: yes
 
   tasks:
-    - name: Initialize Kubernetes cluster
-      shell: |
-        if [ ! -f /etc/kubernetes/admin.conf ]; then
-          kubeadm init --pod-network-cidr=10.244.0.0/16 \
-            --apiserver-advertise-address=$(hostname -I | awk '{print $1}') \
-            --ignore-preflight-errors=all
-        else
-          echo "Cluster already initialized"
-        fi
-      register: init_output
+    - name: Check if kubeconfig exists
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeconfig
 
-    - name: Set up kubeconfig
+    - name: Initialize cluster if not already done
+      shell: |
+        kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all
+      when: not kubeconfig.stat.exists
+
+    - name: Setup kubeconfig for root
       shell: |
         mkdir -p /root/.kube
-        [ -f /etc/kubernetes/admin.conf ] && cp -f /etc/kubernetes/admin.conf /root/.kube/config
+        cp -i /etc/kubernetes/admin.conf /root/.kube/config
         chown $(id -u):$(id -g) /root/.kube/config
-      when: "'Cluster already initialized' not in init_output.stdout"
+      when: not kubeconfig.stat.exists
 
-    - name: Install Flannel CNI
+    - name: Install Flannel if not installed
       shell: |
         kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-      when: "'Cluster already initialized' not in init_output.stdout"
+      when: not kubeconfig.stat.exists
 
-    - name: Create join command
+    - name: Generate join command
       shell: |
         kubeadm token create --print-join-command > /join-cluster.sh
         chmod +x /join-cluster.sh
@@ -129,67 +80,49 @@
       register: join_command
       changed_when: false
 
-    - name: Wait for control plane to be ready
-      shell: |
-        for i in {1..30}; do
-          if kubectl get nodes 2>/dev/null | grep -q "Ready"; then
-            echo "Control plane is ready"
-            exit 0
-          fi
-          sleep 10
-        done
-        exit 1
-      changed_when: false
+    - name: Display join command
+      debug:
+        msg: "Join command: {{ join_command.stdout }}"
 
-- name: Join Worker Nodes
+- name: Join worker nodes to cluster
   hosts: workers
   become: yes
 
   tasks:
-    - name: Wait for master API
+    - name: Wait for master API to be ready
       wait_for:
         host: "{{ hostvars[groups['master'][0]].ansible_host }}"
         port: 6443
         timeout: 300
 
-    - name: Get join command from master
-      shell: |
-        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-          ubuntu@{{ hostvars[groups['master'][0]].ansible_host }} \
-          "cat /join-cluster.sh"
-      register: join_command
-      changed_when: false
+    - name: Join worker to cluster
+      shell: "{{ hostvars[groups['master'][0]]['join_command']['stdout'] }} --ignore-preflight-errors=all"
+      async: 180
+      poll: 15
+      register: join_result
 
-    - name: Join cluster
-      shell: "{{ join_command.stdout }} --ignore-preflight-errors=all"
-      async: 120
-      poll: 10
+    - name: Check join result
+      debug:
+        msg: "Join result: {{ join_result }}"
 
-- name: Verify Cluster
+- name: Final verification
   hosts: master
   become: yes
 
   tasks:
-    - name: Get cluster status
+    - name: Get cluster nodes
       shell: |
-        echo "=== Nodes ==="
-        kubectl get nodes -o wide
+        echo "=== Kubernetes Nodes ==="
+        kubectl get nodes
         echo ""
-        echo "=== Pods ==="
-        kubectl get pods --all-namespaces
+        echo "=== Kubernetes Pods ==="
+        kubectl get pods -A
         echo ""
         echo "=== Cluster Info ==="
         kubectl cluster-info
-      register: cluster_status
+      register: cluster_info
       changed_when: false
 
-    - name: Display cluster status
+    - name: Display cluster info
       debug:
-        msg: "{{ cluster_status.stdout_lines }}"
-
-    - name: Save kubeconfig locally
-      fetch:
-        src: /root/.kube/config
-        dest: ./kubeconfig
-        flat: yes
-      changed_when: false
+        msg: "{{ cluster_info.stdout_lines }}"
