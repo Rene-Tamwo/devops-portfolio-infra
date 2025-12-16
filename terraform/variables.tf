@@ -28,4 +28,16 @@ variable "node_count" {
   default     = 2
 }
 
+variable "k8s_version" {
+  description = "Kubernetes version to install"
+  type        = string
+  default     = "1.28.0"
+}
+
+variable "pod_network_cidr" {
+  description = "CIDR for Kubernetes pod network"
+  type        = string
+  default     = "10.244.0.0/16"
+}
+
 

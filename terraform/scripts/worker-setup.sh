@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-K8S_VERSION="1.28.0"
-MASTER_IP="${master_ip}"  # Remplacé par Terraform
+K8S_VERSION="1.28.0"  # Version fixe
+MASTER_IP="${master_ip}"  # Seule variable nécessaire
 
 # Mise à jour et installation des dépendances
 apt-get update

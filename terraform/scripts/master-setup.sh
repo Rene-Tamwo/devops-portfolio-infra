@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-K8S_VERSION="1.28.0"
-POD_NETWORK_CIDR="10.244.0.0/16"
+K8S_VERSION="${k8s_version}"
+POD_NETWORK_CIDR="${pod_network_cidr}"
 
 # Mise à jour et installation des dépendances
 apt-get update
