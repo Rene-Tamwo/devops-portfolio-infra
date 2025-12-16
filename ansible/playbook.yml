@@ -1,11 +1,15 @@
 ---
+# Variables globales pour tout le playbook
+
+vars:
+  k8s_version: "1.28.0"
+  pod_network_cidr: "10.244.0.0/16"
+
+
 - name: Configure Kubernetes Cluster
   hosts: all
   become: yes
   gather_facts: yes
-  vars:
-    k8s_version: "1.28.0"
-    pod_network_cidr: "10.244.0.0/16"
 
   tasks:
     - name: Update apt cache
