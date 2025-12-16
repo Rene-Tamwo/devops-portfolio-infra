@@ -1,12 +1,7 @@
 ---
-# Variables globales pour tout le playbook
+# Playbook pour configurer le cluster Kubernetes
 
-vars:
-  k8s_version: "1.28.0"
-  pod_network_cidr: "10.244.0.0/16"
-
-
-- name: Configure Kubernetes Cluster
+- name: Configure Kubernetes Cluster - Common Setup
   hosts: all
   become: yes
   gather_facts: yes
@@ -81,7 +76,7 @@ vars:
         - { name: net.bridge.bridge-nf-call-iptables, value: 1 }
         - { name: net.ipv4.ip_forward, value: 1 }
 
-    # Installation Kubernetes - NOUVELLE MÉTHODE
+    # Installation Kubernetes
     - name: Add Kubernetes signing key
       shell: |
         mkdir -p /etc/apt/keyrings
