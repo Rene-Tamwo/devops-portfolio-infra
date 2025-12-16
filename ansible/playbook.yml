@@ -1,200 +1,275 @@
 ---
-- name: Wait for instances and verify basic setup
-  hosts: all
-  become: yes
-  gather_facts: yes  # Important pour avoir ansible_hostname
-
-  tasks:
-    - name: Wait for SSH connection
-      wait_for_connection:
-        timeout: 300
-
-    - name: Check if cloud-init completed
-      wait_for:
-        path: /var/lib/cloud/instance/boot-finished
-        timeout: 600
-      register: cloud_init_done
-
-    - name: Verify Docker installation
-      shell: |
-        docker --version
-        systemctl is-active docker --quiet && echo "active" || echo "inactive"
-      register: docker_check
-      changed_when: false
-
-    - name: Verify Kubernetes components
-      shell: |
-        which kubeadm && kubeadm version -o short 2>/dev/null || echo "kubeadm: not found"
-        which kubelet && kubelet --version 2>/dev/null || echo "kubelet: not found"
-        which kubectl && kubectl version --client 2>/dev/null || echo "kubectl: not found"
-      register: kube_check
-      changed_when: false
-
-    - name: Display installation status
-      debug:
-        msg:
-          - "Host: {{ ansible_hostname }}"
-          - "Docker: {{ docker_check.stdout_lines | join(', ') }}"
-          - "Kubernetes: {{ kube_check.stdout_lines | join(', ') }}"
-
-- name: Configure and verify Kubernetes Master (if needed)
+- name: Diagnostic et réparation du cluster Kubernetes
   hosts: master
   become: yes
 
   tasks:
-    - name: Check if cluster is already initialized
+    - name: Attendre la connexion SSH
+      wait_for_connection:
+        timeout: 300
+
+    - name: Vérifier l'état des services Kubernetes
+      shell: |
+        echo "=== État des services ==="
+        systemctl status kubelet --no-pager || true
+        echo ""
+        echo "=== Logs kubelet (dernières 20 lignes) ==="
+        journalctl -u kubelet -n 20 --no-pager || true
+        echo ""
+        echo "=== Fichiers de configuration Kubernetes ==="
+        ls -la /etc/kubernetes/ || true
+        echo ""
+        echo "=== Vérifier si l'API server écoute ==="
+        netstat -tlnp | grep 6443 || echo "Port 6443 non écouté"
+      register: service_check
+      changed_when: false
+
+    - name: Afficher le diagnostic
+      debug:
+        msg: "{{ service_check.stdout_lines }}"
+
+    - name: Vérifier si le cluster est initialisé mais cassé
       shell: |
         if [ -f /etc/kubernetes/admin.conf ]; then
-          echo "already_initialized"
+          echo "admin_conf_exists"
+          # Vérifier si les composants tournent
+          if systemctl is-active kubelet >/dev/null 2>&1; then
+            # Attendre un peu pour l'API server
+            sleep 30
+            if timeout 10 kubectl get nodes --kubeconfig=/etc/kubernetes/admin.conf 2>/dev/null; then
+              echo "cluster_healthy"
+            else
+              echo "cluster_broken"
+            fi
+          else
+            echo "kubelet_inactive"
+          fi
         else
           echo "not_initialized"
         fi
-      register: cluster_status
+      register: cluster_health
       changed_when: false
 
-    - name: Initialize cluster if not already done (backup)
-      shell: |
-        kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all
-      when: "'not_initialized' in cluster_status.stdout"
-      async: 300
-      poll: 10
+    - name: Réparer le cluster si cassé
+      block:
+        - name: Reset kubeadm si cluster cassé
+          shell: |
+            echo "🔄 Réinitialisation du cluster Kubernetes..."
+            kubeadm reset -f
+            rm -rf /etc/kubernetes/* /var/lib/etcd/* ~/.kube/*
+          when: "'cluster_broken' in cluster_health.stdout or 'kubelet_inactive' in cluster_health.stdout"
 
-    - name: Wait for cluster initialization to complete
-      pause:
-        seconds: 30
-      when: "'not_initialized' in cluster_status.stdout"
+        - name: Nettoyer les interfaces réseau
+          shell: |
+            ip link delete cni0 2>/dev/null || true
+            ip link delete flannel.1 2>/dev/null || true
 
-    - name: Setup kubeconfig for ubuntu user (if missing)
-      shell: |
-        if [ ! -f /home/ubuntu/.kube/config ]; then
-          mkdir -p /home/ubuntu/.kube
-          cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
-          chown -R ubuntu:ubuntu /home/ubuntu/.kube
-        fi
-      when: "'not_initialized' in cluster_status.stdout"
+        - name: Redémarrer kubelet
+          systemd:
+            name: kubelet
+            state: restarted
+            daemon_reload: yes
 
-    - name: Install Flannel network plugin (if missing)
-      shell: |
-        if ! kubectl get daemonsets -n kube-flannel kube-flannel-ds 2>/dev/null; then
-          kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-        fi
-      when: "'not_initialized' in cluster_status.stdout"
+        - name: Initialiser le cluster
+          shell: |
+            kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all
+          async: 300
+          poll: 10
 
-    - name: Generate or refresh join token
+        - name: Configurer kubectl pour root
+          shell: |
+            mkdir -p /root/.kube
+            cp -i /etc/kubernetes/admin.conf /root/.kube/config
+            chown $(id -u):$(id -g) /root/.kube/config
+
+        - name: Configurer kubectl pour ubuntu
+          shell: |
+            mkdir -p /home/ubuntu/.kube
+            cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+            chown -R ubuntu:ubuntu /home/ubuntu/.kube
+
+        - name: Installer Flannel
+          shell: |
+            kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+          when: "'cluster_broken' in cluster_health.stdout or 'kubelet_inactive' in cluster_health.stdout or 'not_initialized' in cluster_health.stdout"
+      when: "'cluster_broken' in cluster_health.stdout or 'kubelet_inactive' in cluster_health.stdout or 'not_initialized' in cluster_health.stdout"
+
+    - name: Attendre que l'API server soit prêt
+      wait_for:
+        port: 6443
+        delay: 10
+        timeout: 300
+      when: "'cluster_broken' in cluster_health.stdout or 'kubelet_inactive' in cluster_health.stdout or 'not_initialized' in cluster_health.stdout"
+
+    - name: Générer le token de join
       shell: |
-        # Generate new token valid for 24 hours
         kubeadm token create --ttl 24h --print-join-command > /join-cluster.sh
         chmod +x /join-cluster.sh
         cat /join-cluster.sh
       register: join_command
       changed_when: false
 
-    - name: Display join command for debugging
+    - name: Afficher le token de join
       debug:
-        msg: "Join command: {{ join_command.stdout }}"
+        msg: "Token de join : {{ join_command.stdout }}"
 
-    - name: Check current cluster status
+    - name: Vérifier l'état du cluster
       shell: |
-        echo "=== Nodes ==="
-        kubectl get nodes -o wide
+        echo "=== État des nœuds ==="
+        kubectl get nodes -o wide 2>/dev/null || echo "Cluster non accessible"
         echo ""
-        echo "=== Pods in kube-system ==="
-        kubectl get pods -n kube-system -o wide
-      register: cluster_info
+        echo "=== Pods système ==="
+        kubectl get pods -n kube-system -o wide 2>/dev/null || echo "Cluster non accessible"
+        echo ""
+        echo "=== Services ==="
+        systemctl status kubelet --no-pager | grep -A5 "Active:" || true
+      register: final_check
       changed_when: false
 
-    - name: Display cluster info
+    - name: Afficher l'état final
       debug:
-        msg: "{{ cluster_info.stdout_lines }}"
+        msg: "{{ final_check.stdout_lines }}"
 
-- name: Join worker nodes to cluster (idempotent)
+- name: Configurer les workers
   hosts: workers
   become: yes
+  vars:
+    master_ip: "{{ hostvars[groups['master'][0]].ansible_host }}"
 
   tasks:
-    - name: Check if worker has already joined
+    - name: Attendre la connexion SSH
+      wait_for_connection:
+        timeout: 300
+
+    - name: Vérifier si déjà joint au cluster
       shell: |
-        if systemctl is-active kubelet 2>/dev/null && [ -f /etc/kubernetes/kubelet.conf ]; then
+        if [ -f /etc/kubernetes/kubelet.conf ]; then
           echo "already_joined"
+          # Vérifier si kubelet tourne
+          if systemctl is-active kubelet >/dev/null 2>&1; then
+            echo "kubelet_active"
+          else
+            echo "kubelet_inactive"
+          fi
         else
           echo "not_joined"
         fi
-      register: join_status
+      register: worker_status
       changed_when: false
 
-    - name: Wait for master API server
-      wait_for:
-        host: "{{ hostvars[groups['master'][0]].ansible_host }}"
-        port: 6443
-        timeout: 300
-      when: "'not_joined' in join_status.stdout"
+    - name: Réparer le worker si nécessaire
+      block:
+        - name: Reset si nécessaire
+          shell: |
+            kubeadm reset -f 2>/dev/null || true
+            rm -rf /etc/kubernetes/* /var/lib/etcd/* ~/.kube/*
+          when: "'kubelet_inactive' in worker_status.stdout"
 
-    - name: Get join command from master
+        - name: Redémarrer kubelet
+          systemd:
+            name: kubelet
+            state: restarted
+            daemon_reload: yes
+      when: "'kubelet_inactive' in worker_status.stdout"
+
+    - name: Joindre le cluster si pas déjà fait
+      block:
+        - name: Attendre que le master soit prêt
+          wait_for:
+            host: "{{ master_ip }}"
+            port: 6443
+            timeout: 300
+
+        - name: Récupérer la commande join depuis le master
+          shell: |
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+              ubuntu@{{ master_ip }} "cat /join-cluster.sh"
+          register: join_cmd
+          retries: 3
+          delay: 10
+          until: join_cmd.stdout != ""
+
+        - name: Exécuter la commande join
+          shell: "{{ join_cmd.stdout }} --ignore-preflight-errors=all"
+          async: 180
+          poll: 15
+          register: join_result
+
+        - name: Vérifier le résultat
+          debug:
+            msg: "Résultat du join : {{ join_result }}"
+      when: "'not_joined' in worker_status.stdout"
+
+    - name: Vérifier l'état du worker
       shell: |
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-          ubuntu@{{ hostvars[groups['master'][0]].ansible_host }} \
-          "cat /join-cluster.sh"
-      register: master_join_command
-      when: "'not_joined' in join_status.stdout"
+        echo "=== État du worker ==="
+        systemctl status kubelet --no-pager | grep -A5 "Active:" || true
+        echo ""
+        echo "=== Version kubelet ==="
+        kubelet --version 2>/dev/null || echo "kubelet non installé"
+      register: worker_check
+      changed_when: false
 
-    - name: Join worker to cluster
-      shell: "{{ master_join_command.stdout }} --ignore-preflight-errors=all"
-      when: 
-        - "'not_joined' in join_status.stdout"
-        - master_join_command.stdout != ""
-      async: 180
-      poll: 15
-      register: join_result
-
-    - name: Check join result
+    - name: Afficher l'état du worker
       debug:
-        msg: 
-          - "Join status: {{ join_status.stdout }}"
-          - "Join result: {{ join_result }}"
+        msg: "{{ worker_check.stdout_lines }}"
 
-- name: Final verification and cluster health check
+- name: Vérification finale du cluster
   hosts: master
   become: yes
 
   tasks:
-    - name: Wait for all nodes to be ready
+    - name: Attendre que tous les nœuds soient prêts
       shell: |
-        TIMEOUT=300
+        TIMEOUT=600
         INTERVAL=10
         ELAPSED=0
         while [ $ELAPSED -lt $TIMEOUT ]; do
-          READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c "Ready")
+          READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c "Ready" || echo 0)
           TOTAL_NODES=$(({{ groups['workers'] | length }} + 1))
           if [ "$READY_NODES" -eq "$TOTAL_NODES" ]; then
-            echo "All $TOTAL_NODES nodes are ready"
+            echo "✅ Tous les $TOTAL_NODES nœuds sont prêts"
             exit 0
           fi
-          echo "Waiting... ($READY_NODES/$TOTAL_NODES nodes ready)"
+          echo "⏳ En attente... ($READY_NODES/$TOTAL_NODES nœuds prêts)"
           sleep $INTERVAL
           ELAPSED=$((ELAPSED + INTERVAL))
         done
-        echo "Timeout waiting for nodes"
+        echo "❌ Timeout atteint"
         exit 1
-      register: wait_nodes
-
-    - name: Display final cluster status
-      shell: |
-        echo "=== FINAL CLUSTER STATUS ==="
-        echo ""
-        echo "1. NODES:"
-        kubectl get nodes -o wide
-        echo ""
-        echo "2. ALL PODS:"
-        kubectl get pods --all-namespaces -o wide
-        echo ""
-        echo "3. CLUSTER INFO:"
-        kubectl cluster-info
-        echo ""
-        echo "4. SYSTEM PODS HEALTH:"
-        kubectl get pods -n kube-system -o wide | grep -v Running && echo "All system pods are running" || true
-      register: final_status
+      register: wait_result
       changed_when: false
 
-    - name: Display final verification
+    - name: Afficher l'état final du cluster
+      shell: |
+        echo "🎉 CLUSTER KUBERNETES OPÉRATIONNEL"
+        echo ""
+        echo "=== NŒUDS ==="
+        kubectl get nodes -o wide
+        echo ""
+        echo "=== PODS (tous les namespaces) ==="
+        kubectl get pods --all-namespaces -o wide
+        echo ""
+        echo "=== SERVICES ==="
+        kubectl get svc --all-namespaces
+        echo ""
+        echo "=== RÉSUMÉ ==="
+        echo "Master: {{ hostvars[groups['master'][0]].ansible_host }}"
+        echo "Workers: {{ groups['workers'] | map('extract', hostvars, 'ansible_host') | list }}"
+      register: cluster_summary
+      changed_when: false
+
+    - name: Afficher le résumé
       debug:
-        msg: "{{ final_status.stdout_lines }}"
+        msg: "{{ cluster_summary.stdout_lines }}"
+
+    - name: Sauvegarder le kubeconfig localement
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "./kubeconfig-{{ cluster_name }}.conf"
+        flat: yes
+      register: kubeconfig_fetch
+
+    - name: Afficher le chemin du kubeconfig
+      debug:
+        msg: "Kubeconfig sauvegardé : {{ kubeconfig_fetch.dest }}"
