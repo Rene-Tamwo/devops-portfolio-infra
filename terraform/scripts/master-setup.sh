@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Activer le logging détaillé
+set -x
+exec > /var/log/user-data.log 2>&1
+
+echo "🚀 Starting master setup at $(date)"
+
 # Mise à jour et installation Docker
 apt-get update
 curl -fsSL https://get.docker.com -o get-docker.sh
@@ -20,32 +26,40 @@ apt-mark hold kubelet kubeadm kubectl
 # Initialisation du cluster
 kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all
 
-# Configuration kubectl
-mkdir -p $HOME/.kube
-cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
-chown $(id -u):$(id -g) $HOME/.kube/config
+# Configuration kubectl pour l'utilisateur ubuntu (CRITIQUE pour Ansible)
+mkdir -p /home/ubuntu/.kube
+cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+chown -R ubuntu:ubuntu /home/ubuntu/.kube
 
-# Installation Flannel
-kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+# Configuration kubectl pour root aussi
+mkdir -p /root/.kube
+cp -i /etc/kubernetes/admin.conf /root/.kube/config
+chown -R root:root /root/.kube
+
+# Installation Flannel en tant que ubuntu
+sudo -u ubuntu kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 
 # Génération du token
 kubeadm token create --print-join-command > /join-cluster.sh
 chmod +x /join-cluster.sh
 
+# Attendre que les pods système démarrent
+sleep 30
+
+# Vérification
+echo "🔍 Cluster status:"
+sudo -u ubuntu kubectl get nodes
+sudo -u ubuntu kubectl get pods -n kube-system
 
 # Marquer la fin de l'installation
 touch /var/lib/cloud/instance/boot-finished
 
-# Créer un fichier de status
-cat <<EOF > /tmp/setup-status.txt
-✅ Setup completed at: $(date)
-✅ Docker: $(docker --version)
-✅ kubeadm: $(kubeadm version -o short)
-✅ kubelet: $(kubelet --version)
-✅ kubectl: $(kubectl version --client -o json | jq -r '.clientVersion.gitVersion')
-EOF
+echo "✅ Master setup COMPLETED at $(date)"
+echo "📋 Verification:"
+kubeadm version
+sudo -u ubuntu kubectl version --client
+docker --version
 
-cat /tmp/setup-status.txt
-
-
-echo "✅ Master setup complete!"
+# Afficher la commande join pour debug
+echo "🔑 Join command:"
+cat /join-cluster.sh
