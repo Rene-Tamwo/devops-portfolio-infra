@@ -230,6 +230,15 @@ jobs:
             -o ConnectTimeout=30 \
             ubuntu@$MASTER_IP "echo '✅ SSH connection successful'" || echo "❌ SSH connection failed"
 
+    - name: Extended wait for cloud-init
+      run: |
+        echo "⏳ Extended wait for cloud-init completion..."
+        for i in {1..12}; do
+          echo "Minute $i of 12..."
+          sleep 60
+        done
+
+
     - name: Run Ansible Playbook
       run: |
         cd ansible
