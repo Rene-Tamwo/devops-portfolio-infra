@@ -146,3 +146,4 @@
     - name: Display final status
       debug:
         msg: "{{ final_status.stdout_lines }}"
+
