@@ -1,63 +1,181 @@
 ---
-- name: Configure Kubernetes Master
+- name: Verify and Configure Kubernetes Cluster
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Wait for cloud-init to complete
+      wait_for:
+        path: /var/lib/cloud/instance/boot-finished
+        timeout: 600
+
+    - name: Verify kubeadm installation
+      shell: |
+        # Attendre que kubeadm soit installé
+        for i in {1..60}; do
+          if command -v kubeadm &>/dev/null; then
+            echo "✅ kubeadm is installed"
+            exit 0
+          fi
+          echo "⏳ Waiting for kubeadm installation... ($i/60)"
+          sleep 10
+        done
+        echo "❌ kubeadm not installed after 10 minutes"
+        exit 1
+      register: kubeadm_wait
+      changed_when: false
+
+- name: Configure Master Node
   hosts: master
-  become: true
+  become: yes
+
   tasks:
-    - name: Wait for SSH to be available
-      wait_for_connection:
-        timeout: 300
+    - name: Check current kubeadm status
+      shell: |
+        kubeadm version 2>/dev/null || echo "Not installed"
+      register: kubeadm_status
+      changed_when: false
+
+    - debug:
+        msg: "kubeadm status: {{ kubeadm_status.stdout }}"
+
+    - name: Check if cluster is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeconfig
+      ignore_errors: yes
+
+    - debug:
+        msg: "Cluster initialized: {{ kubeconfig.stat.exists }}"
+
+    - name: Pull kubeadm images if needed
+      command: kubeadm config images pull --cri-socket=unix:///var/run/dockershim/docker.sock
+      when: not kubeconfig.stat.exists
 
     - name: Initialize Kubernetes cluster
-      command: kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all
-      args:
-        creates: /etc/kubernetes/admin.conf
+      command: |
+        kubeadm init \
+          --pod-network-cidr=10.244.0.0/16 \
+          --cri-socket=unix:///var/run/dockershim/docker.sock \
+          --ignore-preflight-errors=all
+      when: not kubeconfig.stat.exists
+      async: 300
+      poll: 10
 
-    - name: Setup kubeconfig
+    - name: Setup kubeconfig for ubuntu user
+      shell: |
+        mkdir -p /home/ubuntu/.kube
+        cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+        chown -R ubuntu:ubuntu /home/ubuntu/.kube
+      when: not kubeconfig.stat.exists
+
+    - name: Setup kubeconfig for root user
       shell: |
         mkdir -p /root/.kube
         cp -i /etc/kubernetes/admin.conf /root/.kube/config
+      when: not kubeconfig.stat.exists
 
-    - name: Install Flannel
-      shell: >
-        kubectl apply -f
-        https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+    - name: Install Flannel CNI
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      when: not kubeconfig.stat.exists
 
-    - name: Create join command
+    - name: Generate join token
       command: kubeadm token create --print-join-command
       register: join_command
+      when: not kubeconfig.stat.exists
 
     - name: Save join command
       copy:
         content: "{{ join_command.stdout }}"
         dest: /join-cluster.sh
         mode: '0755'
+      when: not kubeconfig.stat.exists
 
-- name: Join Workers
+    - name: Get existing join command
+      shell: cat /join-cluster.sh 2>/dev/null || echo "No join command yet"
+      when: kubeconfig.stat.exists
+      register: existing_join_command
+      changed_when: false
+
+    - name: Display join command
+      debug:
+        msg: "Join command: {{ join_command.stdout if join_command is defined else existing_join_command.stdout }}"
+
+    - name: Verify cluster
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        kubectl get nodes 2>/dev/null || echo "Cluster not ready"
+      register: cluster_status
+      changed_when: false
+
+    - debug:
+        msg: "Cluster status: {{ cluster_status.stdout }}"
+
+- name: Join Worker Nodes
   hosts: workers
-  become: true
-  tasks:
-    - name: Wait for SSH to be available
-      wait_for_connection:
-        timeout: 300
+  become: yes
 
+  tasks:
     - name: Get join command from master
       delegate_to: "{{ groups['master'][0] }}"
       shell: cat /join-cluster.sh
       register: join_cmd
 
-    - name: Join cluster
-      command: "{{ join_cmd.stdout }} --ignore-preflight-errors=all"
+    - name: Check if worker already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: already_joined
 
-- name: Verify Cluster
+    - name: Join worker to cluster
+      command: "{{ join_cmd.stdout }} --cri-socket=unix:///var/run/dockershim/docker.sock --ignore-preflight-errors=all"
+      when: not already_joined.stat.exists
+      async: 180
+      poll: 10
+
+    - name: Restart kubelet
+      systemd:
+        name: kubelet
+        state: restarted
+        daemon_reload: yes
+
+- name: Final Verification
   hosts: master
-  become: true
-  tasks:
-    - name: Check cluster status
-      shell: |
-        kubectl get nodes
-        kubectl cluster-info
-      register: cluster_status
+  become: yes
 
-    - name: Display cluster status
+  tasks:
+    - name: Wait for nodes to join
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        for i in {1..60}; do
+          ready_nodes=$(kubectl get nodes 2>/dev/null | grep -c Ready || echo 0)
+          total_nodes=$(({{ groups['workers'] | length }} + 1))
+          if [ "$ready_nodes" -eq "$total_nodes" ]; then
+            echo "All $total_nodes nodes are ready"
+            exit 0
+          fi
+          echo "Waiting for nodes... ($ready_nodes/$total_nodes ready)"
+          sleep 10
+        done
+        echo "Timeout waiting for nodes"
+        exit 1
+      register: wait_result
+
+    - name: Show final cluster status
+      shell: |
+        export KUBECONFIG=/etc/kubernetes/admin.conf
+        echo "=== NODES ==="
+        kubectl get nodes -o wide
+        echo ""
+        echo "=== PODS ==="
+        kubectl get pods -A -o wide
+        echo ""
+        echo "=== SERVICES ==="
+        kubectl get svc -A
+      register: final_status
+
+    - name: Display final status
       debug:
-        msg: "{{ cluster_status.stdout_lines }}"
+        msg: "{{ final_status.stdout_lines }}"
