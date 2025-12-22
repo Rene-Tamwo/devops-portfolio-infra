@@ -1,7 +1,9 @@
 #!/bin/bash
 
-set -x
+# log tout
+
 exec > /var/log/user-data.log 2>&1
+set -x
 
 echo "🚀 Starting worker setup at $(date)"
 

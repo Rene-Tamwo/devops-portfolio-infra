@@ -1,9 +1,14 @@
 #!/bin/bash
 
+# Log tout
+exec > >(tee /var/log/user-data.log) 2>&1
 set -x
-exec > /var/log/user-data.log 2>&1
 
 echo "🚀 Starting master setup at $(date)"
+
+# Vérifier la connexion internet
+echo "📡 Checking internet connection..."
+ping -c 3 google.com || echo "⚠️ No internet connection"
 
 # Mise à jour
 apt-get update
