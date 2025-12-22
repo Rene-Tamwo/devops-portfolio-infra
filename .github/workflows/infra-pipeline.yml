@@ -94,12 +94,12 @@ jobs:
         AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-        - name: Debug - Check Master Logs
-          run: |
-            echo "🔍 FULL MASTER LOGS:"
-            MASTER_IP="${{ env.MASTER_IP }}"
-            ssh -o StrictHostKeyChecking=no -i /tmp/kubernetes-key.pem ubuntu@$MASTER_IP \
-              "tail -100 /var/log/user-data.log" || echo "Could not fetch logs"
+    - name: Debug - Check Master Logs
+      run: |
+        echo "🔍 FULL MASTER LOGS:"
+        MASTER_IP="${{ env.MASTER_IP }}"
+        ssh -o StrictHostKeyChecking=no -i /tmp/kubernetes-key.pem ubuntu@$MASTER_IP \
+          "tail -100 /var/log/user-data.log" || echo "Could not fetch logs"
 
     - name: Get Terraform Outputs
       id: tf-outputs  # ⚠️ ID CORRECT : tf-outputs
