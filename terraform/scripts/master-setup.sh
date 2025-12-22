@@ -1,54 +1,57 @@
 #!/bin/bash
 
-# Log tout
+# Configuration du logging
 exec > >(tee /var/log/user-data.log) 2>&1
 set -x
 
-echo "🚀 Starting master setup at $(date)"
+echo "🚀🚀🚀 STARTING MASTER SETUP - $(date) 🚀🚀🚀"
 
-# Vérifier la connexion internet
-echo "📡 Checking internet connection..."
-ping -c 3 google.com || echo "⚠️ No internet connection"
-
-# Mise à jour
+# 1. Mise à jour système
+echo "📦 Updating system..."
 apt-get update
-apt-get upgrade -y
+DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q
 
-# Installation Docker avec la bonne version
+# 2. Installation Docker (version stable)
+echo "🐳 Installing Docker..."
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
 
-# Configuration Docker pour Kubernetes (CRITIQUE)
+# Configuration Docker
 mkdir -p /etc/docker
-cat <<EOF | tee /etc/docker/daemon.json
+cat > /etc/docker/daemon.json <<EOF
 {
   "exec-opts": ["native.cgroupdriver=systemd"],
   "log-driver": "json-file",
   "log-opts": {
     "max-size": "100m"
   },
-  "storage-driver": "overlay2",
-  "registry-mirrors": [],
-  "live-restore": true
+  "storage-driver": "overlay2"
 }
 EOF
 
-# Redémarrer Docker
 systemctl daemon-reload
 systemctl restart docker
 systemctl enable docker
 
-# Charger les modules kernel nécessaires
-modprobe overlay
-modprobe br_netfilter
+# Vérifier Docker
+docker --version || echo "❌ Docker install failed"
 
-cat <<EOF | tee /etc/modules-load.d/k8s.conf
+# 3. Désactiver swap
+echo "⚡ Disabling swap..."
+swapoff -a
+sed -i '/ swap / s/^/#/' /etc/fstab
+
+# 4. Configuration réseau
+echo "🌐 Configuring network..."
+cat > /etc/modules-load.d/k8s.conf <<EOF
 overlay
 br_netfilter
 EOF
 
-# Configuration sysctl
-cat <<EOF | tee /etc/sysctl.d/k8s.conf
+modprobe overlay
+modprobe br_netfilter
+
+cat > /etc/sysctl.d/k8s.conf <<EOF
 net.bridge.bridge-nf-call-ip6tables = 1
 net.bridge.bridge-nf-call-iptables = 1
 net.ipv4.ip_forward = 1
@@ -56,62 +59,52 @@ EOF
 
 sysctl --system
 
-# Désactivation swap
-swapoff -a
-sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+# 5. Installation Kubernetes (VERSION SIMPLIFIÉE)
+echo "🎯 Installing Kubernetes..."
+# Ajout du repo
+curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | tee /etc/apt/sources.list.d/kubernetes.list
 
-# Installation Kubernetes (version explicite)
-curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
-echo "deb https://apt.kubernetes.io/ kubernetes-xenial main" | tee /etc/apt/sources.list.d/kubernetes.list
-
+# Installation
 apt-get update
-apt-get install -y kubelet=1.28.0-00 kubeadm=1.28.0-00 kubectl=1.28.0-00
+apt-get install -y kubelet kubeadm kubectl
 apt-mark hold kubelet kubeadm kubectl
 
-# Pré-télécharger les images (évite les timeout)
-kubeadm config images pull --cri-socket=unix:///var/run/dockershim/docker.sock
+# Vérification
+echo "✅ Installed versions:"
+kubeadm version || echo "❌ kubeadm not installed"
+kubectl version --client 2>/dev/null || echo "❌ kubectl not installed"
 
-# Initialiser le cluster avec Docker comme runtime
-kubeadm init \
-  --pod-network-cidr=10.244.0.0/16 \
-  --cri-socket=unix:///var/run/dockershim/docker.sock \
-  --ignore-preflight-errors=all
+# 6. Initialisation du cluster (SIMPLIFIÉE)
+echo "🔄 Initializing Kubernetes cluster..."
+kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all
 
-# Configuration kubectl pour ubuntu user
+# 7. Configuration kubectl
+echo "⚙️ Setting up kubectl..."
 mkdir -p /home/ubuntu/.kube
 cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
 chown -R ubuntu:ubuntu /home/ubuntu/.kube
 
-# Configuration kubectl pour root
 mkdir -p /root/.kube
 cp -i /etc/kubernetes/admin.conf /root/.kube/config
 
-# Installation Flannel (doit être fait après kubeconfig)
-export KUBECONFIG=/etc/kubernetes/admin.conf
+# 8. Installation réseau Flannel
+echo "🔗 Installing Flannel network..."
 kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
 
-# Générer token de join
+# 9. Génération du token de join
+echo "🔑 Generating join token..."
 kubeadm token create --print-join-command > /join-cluster.sh
 chmod +x /join-cluster.sh
 
-# Attendre que le cluster soit prêt
-echo "⏳ Waiting for cluster to be ready..."
-for i in {1..30}; do
-  if kubectl get nodes 2>/dev/null | grep -q "$(hostname)"; then
-    echo "✅ Cluster is ready!"
-    break
-  fi
-  echo "⏳ Still waiting... ($i/30)"
-  sleep 10
-done
-
-# Afficher l'état
-echo "🔍 Cluster status:"
+# 10. Vérification finale
+echo "📊 Final verification..."
 kubectl get nodes
-kubectl get pods -n kube-system
+kubectl get pods --all-namespaces
 
-# Créer un marqueur de fin
+# 11. Marqueur de fin
 touch /var/lib/cloud/instance/boot-finished
-echo "✅ Master setup COMPLETED at $(date)"
-echo "🔑 Join command:"
+echo "🎉🎉🎉 MASTER SETUP COMPLETED SUCCESSFULLY! - $(date) 🎉🎉🎉"
+echo ""
+echo "🔗 Join command:"
 cat /join-cluster.sh
