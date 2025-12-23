@@ -78,15 +78,14 @@
         create: yes
 
     - name: Update apt cache and install Kubernetes
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-        name:
-          - kubelet
-          - kubeadm
-          - kubectl
-        state: present
-        install_recommends: no
+      shell: |
+        apt-get update
+        # Try specific version first, then fallback to latest
+        apt-get install -y kubelet=1.28.0-00 kubeadm=1.28.0-00 kubectl=1.28.0-00 || \
+        apt-get install -y kubelet kubeadm kubectl
+        apt-mark hold kubelet kubeadm kubectl
+      args:
+        executable: /bin/bash
 
     - name: Hold Kubernetes packages at current version
       shell: |
