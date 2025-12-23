@@ -1,5 +1,5 @@
 ---
-- name: Install Docker on all nodes
+- name: Install Docker and prerequisites
   hosts: all
   become: yes
   gather_facts: yes
@@ -9,206 +9,104 @@
       wait_for:
         path: /var/lib/cloud/instance/boot-finished
         state: present
-        timeout: 300
+        timeout: 600
 
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-
-    - name: Install Docker if not present
+    - name: Install Docker
       apt:
         name: docker.io
         state: present
 
-    - name: Ensure Docker is started
+    - name: Start Docker
       systemd:
         name: docker
         state: started
         enabled: yes
 
-- name: Configure Kubernetes on all nodes
-  hosts: all
-  become: yes
-
-  tasks:
     - name: Disable swap
       shell: |
         swapoff -a
         sed -i '/ swap / s/^/#/' /etc/fstab
-      tags: k8s
 
-    - name: Load kernel modules
+    - name: Configure kernel modules
       shell: |
+        cat > /etc/modules-load.d/k8s.conf <<EOF
+        overlay
+        br_netfilter
+        EOF
+        
         modprobe overlay
         modprobe br_netfilter
-      tags: k8s
+        
+        cat > /etc/sysctl.d/k8s.conf <<EOF
+        net.bridge.bridge-nf-call-ip6tables = 1
+        net.bridge.bridge-nf-call-iptables = 1
+        net.ipv4.ip_forward = 1
+        EOF
+        
+        sysctl --system
 
-    - name: Configure sysctl
-      copy:
-        dest: /etc/modules-load.d/k8s.conf
-        content: |
-          overlay
-          br_netfilter
-      tags: k8s
+- name: Install Kubernetes with SCRIPT (plus fiable)
+  hosts: all
+  become: yes
 
-    - name: Configure sysctl parameters
-      copy:
-        dest: /etc/sysctl.d/k8s.conf
-        content: |
-          net.bridge.bridge-nf-call-ip6tables = 1
-          net.bridge.bridge-nf-call-iptables = 1
-          net.ipv4.ip_forward = 1
-      tags: k8s
-
-    - name: Apply sysctl
-      command: sysctl --system
-      tags: k8s
-
-    - name: Add Kubernetes repository
-      apt_key:
-        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
-        state: present
-      tags: k8s
-
-    - name: Add Kubernetes APT repository
-      apt_repository:
-        repo: "deb https://apt.kubernetes.io/ kubernetes-xenial main"
-        state: present
-        filename: kubernetes
-      tags: k8s
-
-    - name: Install Kubernetes packages
-      apt:
-        name:
-          - kubelet=1.28.0-00
-          - kubeadm=1.28.0-00
-          - kubectl=1.28.0-00
-        state: present
-        update_cache: yes
-      tags: k8s
-
-    - name: Hold Kubernetes packages
+  tasks:
+    - name: Install Kubernetes using official script
       shell: |
+        # Méthode officielle de Kubernetes
+        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-jammy main" | tee /etc/apt/sources.list.d/kubernetes.list
+        
+        apt-get update
+        apt-get install -y kubelet kubeadm kubectl
         apt-mark hold kubelet kubeadm kubectl
-      tags: k8s
 
-- name: Initialize Kubernetes Master
+- name: Initialize Master
   hosts: master
   become: yes
 
   tasks:
-    - name: Check if cluster already initialized
-      stat:
-        path: /etc/kubernetes/admin.conf
-      register: kubeconfig
-
     - name: Initialize Kubernetes cluster
-      command: |
-        kubeadm init \
-          --pod-network-cidr=10.244.0.0/16 \
-          --ignore-preflight-errors=all
-      when: not kubeconfig.stat.exists
-      async: 300
-      poll: 10
-
-    - name: Configure kubectl for ubuntu user
       shell: |
-        mkdir -p /home/ubuntu/.kube
-        cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+        kubeadm init --pod-network-cidr=10.244.0.0/16 --ignore-preflight-errors=all
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Setup kubectl
+      shell: |
+        mkdir -p /home/ubuntu/.kube /root/.kube
+        cp -f /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+        cp -f /etc/kubernetes/admin.conf /root/.kube/config
         chown -R ubuntu:ubuntu /home/ubuntu/.kube
-      when: not kubeconfig.stat.exists
 
-    - name: Configure kubectl for root user
-      shell: |
-        mkdir -p /root/.kube
-        cp -i /etc/kubernetes/admin.conf /root/.kube/config
-      when: not kubeconfig.stat.exists
-
-    - name: Install Flannel CNI
+    - name: Install Flannel
       shell: |
         kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
-      when: not kubeconfig.stat.exists
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
 
     - name: Create join command
       shell: |
-        kubeadm token create --print-join-command
-      when: not kubeconfig.stat.exists
-      register: join_command
+        kubeadm token create --print-join-command > /join-cluster.sh
+        chmod +x /join-cluster.sh
+        cat /join-cluster.sh
 
-    - name: Save join command to file
-      copy:
-        content: "{{ join_command.stdout }}"
-        dest: /join-cluster.sh
-        mode: '0755'
-      when: not kubeconfig.stat.exists
-
-    - name: Get existing join command
-      shell: cat /join-cluster.sh 2>/dev/null || echo "No join command"
-      when: kubeconfig.stat.exists
-      register: existing_join_command
-
-    - name: Display join command
-      debug:
-        msg: "Join command: {{ join_command.stdout if join_command is defined else existing_join_command.stdout }}"
-
-- name: Join Worker Nodes
+- name: Join Workers
   hosts: workers
   become: yes
 
   tasks:
-    - name: Get join command from master
-      delegate_to: "{{ groups['master'][0] }}"
-      shell: cat /join-cluster.sh
-      register: join_cmd
+    - name: Join cluster
+      shell: |
+        ssh-keyscan -H {{ groups['master'][0] }} >> ~/.ssh/known_hosts
+        JOIN_CMD=$(ssh -o StrictHostKeyChecking=no ubuntu@{{ groups['master'][0] }} "cat /join-cluster.sh")
+        echo "Joining with: $JOIN_CMD"
+        $JOIN_CMD --ignore-preflight-errors=all
 
-    - name: Check if already joined
-      stat:
-        path: /etc/kubernetes/kubelet.conf
-      register: already_joined
-
-    - name: Join worker to cluster
-      command: "{{ join_cmd.stdout }} --ignore-preflight-errors=all"
-      when: not already_joined.stat.exists
-      async: 180
-      poll: 10
-
-- name: Verify Cluster
+- name: Verify
   hosts: master
   become: yes
 
   tasks:
-    - name: Wait for cluster to be ready
+    - name: Check cluster
       shell: |
-        for i in {1..60}; do
-          if kubectl get nodes 2>/dev/null | grep -q Ready; then
-            echo "✅ Cluster is ready"
-            exit 0
-          fi
-          echo "⏳ Waiting for cluster... ($i/60)"
-          sleep 5
-        done
-        echo "❌ Timeout waiting for cluster"
-        exit 1
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-
-    - name: Get cluster status
-      shell: |
-        echo "=== CLUSTER INFO ==="
-        kubectl cluster-info
-        echo ""
-        echo "=== NODES ==="
-        kubectl get nodes -o wide
-        echo ""
-        echo "=== SYSTEM PODS ==="
-        kubectl get pods -n kube-system -o wide
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
-      register: cluster_status
-
-    - name: Display cluster status
-      debug:
-        msg: "{{ cluster_status.stdout_lines }}"
+        sleep 30
+        kubectl get nodes
+        kubectl get pods -A
