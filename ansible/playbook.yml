@@ -117,12 +117,25 @@
         chown -R ubuntu:ubuntu /home/ubuntu/.kube
       when: not kubeconfig.stat.exists
 
+    - name: Wait for Kubernetes API to be ready
+      shell: |
+        for i in {1..60}; do
+          if kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes 2>/dev/null | grep -q "master"; then
+            echo "✅ Kubernetes API is ready"
+            exit 0
+          fi
+          echo "⏳ Waiting for Kubernetes API... ($i/60)"
+          sleep 5
+        done
+        echo "❌ Kubernetes API not ready after 5 minutes"
+        exit 1
+      args:
+        executable: /bin/bash
+
     - name: Install Flannel network
       shell: |
-        kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
       when: not kubeconfig.stat.exists
-      environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
 
     - name: Create join command
       shell: |
@@ -179,7 +192,7 @@
         kubectl get pods -A -o wide
       register: cluster_info
       environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
+        KUBECONFIG: /home/ubuntu/.kube/config
 
     - name: Display cluster status
       debug:
