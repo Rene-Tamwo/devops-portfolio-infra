@@ -97,10 +97,22 @@ jobs:
     - name: Debug - Check Master Logs
       run: |
         echo "🔍 FULL MASTER LOGS:"
-        MASTER_IP="${{ env.MASTER_IP }}"
-        ssh -o StrictHostKeyChecking=no -i /tmp/kubernetes-key.pem ubuntu@$MASTER_IP \
-          "tail -100 /var/log/user-data.log" || echo "Could not fetch logs"
-
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+          -i /tmp/kubernetes-key.pem ubuntu@${{ env.MASTER_IP }} \
+          "cat /var/log/user-data.log" || echo "Could not fetch logs"
+        
+        echo ""
+        echo "🔍 CHECKING INSTALLED PACKAGES:"
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+          -i /tmp/kubernetes-key.pem ubuntu@${{ env.MASTER_IP }} \
+          "which kubeadm kubelet kubectl docker || echo 'Not found'; ls -la /usr/bin/kube* || echo 'No kube files'" || true
+        
+        echo ""
+        echo "🔍 CHECKING SYSTEMD SERVICES:"
+        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+          -i /tmp/kubernetes-key.pem ubuntu@$MASTER_IP \
+          "systemctl status docker kubelet 2>/dev/null || echo 'Services not running'" || true
+          
     - name: Get Terraform Outputs
       id: tf-outputs  # ⚠️ ID CORRECT : tf-outputs
       run: |
