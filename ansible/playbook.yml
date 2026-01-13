@@ -117,25 +117,51 @@
         chown -R ubuntu:ubuntu /home/ubuntu/.kube
       when: not kubeconfig.stat.exists
 
-    - name: Wait for Kubernetes API to be ready
+    - name: Wait for Kubernetes API to be ready (REAL WAIT)
       shell: |
-        # Script plus robuste avec timeout
-        timeout 300 bash -c '
-          until kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes 2>/dev/null | grep -q "master"; do
-            echo "⏳ Waiting for Kubernetes API..."
-            sleep 10
-          done
-          echo "✅ Kubernetes API is ready"
-        '
+        # Attendre que l'API Kubernetes soit vraiment prête
+        echo "⏳ Waiting for Kubernetes API server..."
+        
+        # Attendre que le service écoute sur le port
+        while ! ss -tln | grep -q ':6443'; do
+          echo "Port 6443 not listening yet..."
+          sleep 10
+        done
+        
+        # Attendre que l'API réponde
+        for i in {1..30}; do
+          if timeout 5 kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes 2>/dev/null; then
+            echo "✅ Kubernetes API is responding!"
+            exit 0
+          fi
+          echo "Attempt $i/30 - API not responding yet..."
+          sleep 10
+        done
+        
+        echo "❌ ERROR: Kubernetes API not ready after 5 minutes"
+        exit 1
       args:
         executable: /bin/bash
       when: not kubeconfig.stat.exists
-      async: 310  # Plus long que le timeout du script
-      poll: 0  # Ne pas poller
+      async: 400  # 6.5 minutes max
+      poll: 0
 
-    - name: Install Flannel network
+    - name: Install Flannel network (with retry)
       shell: |
-        kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+        # Essayer plusieurs fois avec des retries
+        for attempt in {1..5}; do
+          echo "Attempt $attempt/5 to install Flannel..."
+          if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml; then
+            echo "✅ Flannel installed successfully"
+            exit 0
+          fi
+          echo "Flannel installation failed, retrying in 15 seconds..."
+          sleep 15
+        done
+        echo "❌ Failed to install Flannel after 5 attempts"
+        exit 1
+      args:
+        executable: /bin/bash
       when: not kubeconfig.stat.exists
 
     - name: Create join command
