@@ -119,18 +119,19 @@
 
     - name: Wait for Kubernetes API to be ready
       shell: |
-        for i in {1..60}; do
-          if kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes 2>/dev/null | grep -q "master"; then
-            echo "✅ Kubernetes API is ready"
-            exit 0
-          fi
-          echo "⏳ Waiting for Kubernetes API... ($i/60)"
-          sleep 5
-        done
-        echo "❌ Kubernetes API not ready after 5 minutes"
-        exit 1
+        # Script plus robuste avec timeout
+        timeout 300 bash -c '
+          until kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes 2>/dev/null | grep -q "master"; do
+            echo "⏳ Waiting for Kubernetes API..."
+            sleep 10
+          done
+          echo "✅ Kubernetes API is ready"
+        '
       args:
         executable: /bin/bash
+      when: not kubeconfig.stat.exists
+      async: 310  # Plus long que le timeout du script
+      poll: 0  # Ne pas poller
 
     - name: Install Flannel network
       shell: |

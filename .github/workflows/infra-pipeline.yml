@@ -190,7 +190,7 @@ jobs:
     - name: Wait for instances to be ready
       run: |
         echo "⏳ Waiting for EC2 instances to be ready..."
-        sleep 300 
+        sleep 180 
 
     - name: Generate Dynamic Inventory
       run: |
@@ -231,10 +231,30 @@ jobs:
             ubuntu@$MASTER_IP "echo '✅ SSH connection successful'" || echo "❌ SSH connection failed"
 
 
+    - name: Verify instance is fully ready
+      run: |
+        echo "Verifying instance setup completion..."
+        ssh -i /tmp/kubernetes-key.pem \
+            -o StrictHostKeyChecking=no \
+            ubuntu@$MASTER_IP "
+          # Vérifier que cloud-init a fini
+          while [ ! -f /var/lib/cloud/instance/boot-finished ]; do
+            echo 'Waiting for cloud-init...'
+            sleep 10
+          done
+          echo 'Cloud-init finished'
+          
+          # Vérifier que Docker tourne
+          sudo systemctl is-active --quiet docker && echo 'Docker running' || echo 'Docker not running'
+        "
+
+            
     - name: Run Ansible Playbook
       run: |
         cd ansible
-        ansible-playbook -i dynamic-inventory.ini playbook.yml
+        ansible-playbook -i dynamic-inventory.ini playbook.yml \
+          --ssh-common-args='-o ServerAliveInterval=30 -o ServerAliveCountMax=3' \
+          --timeout=60
 
     - name: Test Kubernetes Cluster
       run: |
