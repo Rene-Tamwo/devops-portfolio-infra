@@ -276,7 +276,7 @@ jobs:
     name: Destroy Infrastructure
     needs: ansible-configure
     runs-on: ubuntu-latest
-    if: false  # Désactivé par défaut - à activer manuellement
+    if: true
     
     steps:
     - name: Checkout code
