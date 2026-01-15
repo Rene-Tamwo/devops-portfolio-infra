@@ -1,0 +1,75 @@
+name: 🗑️ Destroy Infrastructure (Safe)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "DESTROY-INFRA" to confirm'
+        required: true
+        type: string
+        default: ''
+
+jobs:
+  destroy-infrastructure:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm_destroy == 'DESTROY-INFRA'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.5.0"
+
+    - name: Get current infrastructure info
+      run: |
+        cd terraform
+        terraform init -input=false
+        
+        echo "📋 CURRENT INFRASTRUCTURE STATE:"
+        echo "================================="
+        
+        # Afficher les outputs actuels
+        terraform output || echo "No outputs available"
+        
+        # Plan de destruction
+        terraform plan -destroy -input=false -var="aws_region=${{ secrets.AWS_REGION }}" -no-color
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    - name: Wait for manual confirmation (10 minutes)
+      run: |
+        echo "⏳ Waiting 10 minutes before destruction..."
+        echo "⏰ Destruction will start at: $(date -d '+10 minutes' '+%H:%M:%S')"
+        echo "🚨 Press 'Cancel workflow' in GitHub to stop!"
+        sleep 600
+
+    - name: Destroy Infrastructure
+      run: |
+        cd terraform
+        echo "🔥 STARTING DESTRUCTION - $(date)"
+        
+        terraform destroy -auto-approve -input=false -var="aws_region=${{ secrets.AWS_REGION }}"
+        
+        echo "✅ DESTRUCTION COMPLETE - $(date)"
+        echo "📊 Resources destroyed:"
+        echo "   - 3 EC2 instances (t3.medium)"
+        echo "   - VPC + Subnet + Internet Gateway"
+        echo "   - Security Groups"
+        echo "   - Key Pair"
+        echo "   - Route Tables"
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    - name: Cleanup local files
+      run: |
+        # Supprimer les fichiers sensibles
+        rm -f terraform/kubernetes-key.pem || true
+        rm -f terraform/.terraform.lock.hcl || true
+        rm -rf terraform/.terraform || true
+        
+        echo "🧹 Local files cleaned up"
